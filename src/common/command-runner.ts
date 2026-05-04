@@ -1,0 +1,117 @@
+/**
+ * Generic subprocess runner: spawns a shell command, streams stdout/stderr
+ * into an {@link OutputWindow} beneath an animated spinner, and resolves
+ * with the execa result on success. Throws on non-zero exit code.
+ */
+
+import { execa, type ExecaError, type Result } from 'execa';
+import ora from 'ora';
+import logUpdate from 'log-update';
+import chalk from 'chalk';
+import { theme } from './logger';
+import { OutputWindow } from './output-window';
+
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
+const SPINNER_INTERVAL_MS = 80;
+
+// ─────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────
+export interface RunCommandOptions {
+  /** Working directory the command runs in. */
+  readonly cwd: string;
+  /** Human-readable label shown next to the spinner. Defaults to the command. */
+  readonly description?: string;
+}
+
+export type CommandResult = Result;
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+/** Splits a chunk of subprocess output into non-empty lines. */
+const chunkToLines = (chunk: unknown): string[] => {
+  const text = typeof chunk === 'string' ? chunk : String(chunk);
+  return text.split('\n').filter((line) => line.length > 0);
+};
+
+/** Builds the spinner header text shown above the streamed output. */
+const buildSpinnerHeader = (frame: string, label: string): string =>
+  `${chalk.cyan(frame)} ${theme.highlight(label)}`;
+
+// ─────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────
+/**
+ * Runs a shell command with a live spinner + 3-line tail of streamed output.
+ *
+ * - Resolves with the underlying `execa` result on success.
+ * - Throws if the process exits with a non-zero code (or fails to spawn).
+ * - The caller chooses the cwd and an optional human-readable description.
+ */
+export const runCommand = async (
+  command: string,
+  options: RunCommandOptions,
+): Promise<CommandResult> => {
+  const { cwd, description } = options;
+  const label = description ?? command;
+  const outputWindow = new OutputWindow();
+  const spinner = ora({ text: theme.highlight(label), color: 'cyan' });
+
+  outputWindow.updateSpinnerText(buildSpinnerHeader(SPINNER_FRAMES[0], label));
+
+  let frameIndex = 0;
+  const animationInterval = setInterval(() => {
+    frameIndex = (frameIndex + 1) % SPINNER_FRAMES.length;
+    outputWindow.updateSpinnerText(buildSpinnerHeader(SPINNER_FRAMES[frameIndex], label));
+  }, SPINNER_INTERVAL_MS);
+
+  try {
+    const subprocess = execa(command, {
+      cwd,
+      shell: true,
+      reject: false,
+    });
+
+    subprocess.stdout?.on('data', (chunk: unknown) => {
+      for (const line of chunkToLines(chunk)) outputWindow.addLine(line);
+    });
+    subprocess.stderr?.on('data', (chunk: unknown) => {
+      for (const line of chunkToLines(chunk)) outputWindow.addLine(line);
+    });
+
+    const result = await subprocess;
+    clearInterval(animationInterval);
+    logUpdate.clear();
+
+    if (result.exitCode !== 0) {
+      spinner.fail(theme.error(label));
+      const stderr = typeof result.stderr === 'string' ? result.stderr : '';
+      const stdout = typeof result.stdout === 'string' ? result.stdout : '';
+      const detail = stderr || stdout || `Command failed with exit code ${result.exitCode}`;
+      const failure = new Error(detail) as Error & { stderr?: string };
+      failure.stderr = stderr;
+      throw failure;
+    }
+
+    spinner.succeed(theme.success(label));
+    return result;
+  } catch (err) {
+    clearInterval(animationInterval);
+    logUpdate.clear();
+    spinner.fail(theme.error(label));
+
+    // Surface execa's stderr through the thrown error if present.
+    if (err instanceof Error) throw err;
+    const wrapped = new Error(String(err)) as Error & { cause?: unknown };
+    wrapped.cause = err;
+    throw wrapped;
+  }
+};
+
+/** Type guard for execa's failure shape, useful when callers want to inspect stderr. */
+export const isExecaError = (err: unknown): err is ExecaError =>
+  err instanceof Error && 'stderr' in err;
