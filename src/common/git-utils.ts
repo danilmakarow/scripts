@@ -64,3 +64,20 @@ export const getCurrentBranch = async (cwd: string): Promise<string> => {
  */
 export const isMasterBranch = (branchName: string): boolean =>
   branchName === 'master' || branchName === 'main';
+
+/**
+ * Resolves the repo's primary branch name (`master` or `main`) by probing
+ * local refs at `cwd`. Prefers `master` when both exist. Throws when neither
+ * is found.
+ */
+export const findMasterBranch = async (cwd: string): Promise<string> => {
+  for (const candidate of ['master', 'main'] as const) {
+    const result = await execa(
+      'git',
+      ['rev-parse', '--verify', '--quiet', `refs/heads/${candidate}`],
+      { cwd, reject: false },
+    );
+    if (result.exitCode === 0) return candidate;
+  }
+  throw new Error(`No "master" or "main" branch found in ${cwd}`);
+};

@@ -1,9 +1,10 @@
 /**
- * Small filesystem helpers used by `do-*` scripts: directory listings and
- * typed JSON read/write.
+ * Small filesystem helpers used by `do-*` scripts: directory listings, fuzzy
+ * directory matching, and typed JSON read/write.
  */
 
 import fs from 'node:fs';
+import { SuggestionError } from './errors';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -48,3 +49,31 @@ export const writeJson = (filePath: string, data: unknown): void => {
 
 /** Returns true if `filePath` exists on disk (file or directory). */
 export const pathExists = (filePath: string): boolean => fs.existsSync(filePath);
+
+/**
+ * Resolves a fuzzy `partial` against `directories`. Exact match wins; otherwise
+ * any directory whose name contains `partial`. Throws a {@link SuggestionError}
+ * when zero or multiple matches are found.
+ */
+export const matchDirectory = (
+  partial: string,
+  directories: readonly string[],
+): string => {
+  if (directories.includes(partial)) return partial;
+
+  const matches = directories.filter((dir) => dir.includes(partial));
+  if (matches.length === 0) {
+    throw new SuggestionError(`No directory found matching "${partial}"`, {
+      suggestionLabel: 'Available directories:',
+      suggestions: directories,
+    });
+  }
+  if (matches.length > 1) {
+    throw new SuggestionError(`Multiple directories match "${partial}"`, {
+      suggestionLabel: 'Matching directories:',
+      suggestions: matches,
+    });
+  }
+
+  return matches[0];
+};

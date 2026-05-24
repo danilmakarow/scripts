@@ -1,7 +1,7 @@
 # pack (build & install pipeline)
 
 The `pack` script compiles every `src/do-*.ts` command into a self-contained
-executable JS file inside a tmpdir-backed directory and refreshes a delimited
+executable JS file inside `~/.local/bin/<dirname>` and refreshes a delimited
 block in `~/.zshrc` so each command becomes a zsh alias.
 
 It is the only mechanism for installing/refreshing the `do*` commands on the
@@ -21,15 +21,16 @@ The install dir name is **resolved from environment**, not from a CLI argument:
 
 - If `SCRIPTS_PACK_DIR` is set (in `.env` or process env) and non-empty, that
   value is used.
-- Otherwise the default `custom-scripts` is used.
+- Otherwise the default `custom_scripts` is used.
 
-The dir is always created under `os.tmpdir()` (e.g.
-`/var/folders/.../T/<dirname>` on macOS).
+The dir is always created under `~/.local/bin/` (i.e.
+`~/.local/bin/<dirname>`), so the compiled bundles survive reboots and
+`$TMPDIR` cleanup.
 
 ### Examples
 
 ```bash
-# Default install location: $TMPDIR/custom-scripts
+# Default install location: ~/.local/bin/custom_scripts
 pnpm run pack
 
 # Override via .env
@@ -45,12 +46,12 @@ SCRIPTS_PACK_DIR=experimental pnpm run pack
 1. **Load `.env`** from the project root so `SCRIPTS_PACK_DIR` can be set
    there.
 2. **Resolve the dir name** from `process.env.SCRIPTS_PACK_DIR` (trimmed),
-   falling back to `custom-scripts`. Validates the resolved value via LIVR
+   falling back to `custom_scripts`. Validates the resolved value via LIVR
    (consistent with `do-connect`'s env validation) — required, non-empty,
    ≤ 64 chars, matches `[A-Za-z0-9._-]+` — i.e. no slashes, spaces, shell
    metacharacters, or path traversal. A bad env value cannot escape the
-   tmp dir.
-3. **Resolve the target dir** to `path.join(os.tmpdir(), <dirname>)`.
+   install root.
+3. **Resolve the target dir** to `path.join(os.homedir(), '.local', 'bin', <dirname>)`.
 4. **Clear the target dir** (`rm -rf` then `mkdir -p`) and verify it is empty
    afterwards. Refuses to continue if anything remains.
 5. **Discover scripts** — reads `src/`, picks every regular file matching
@@ -83,10 +84,10 @@ The script manages a delimited block bounded by sentinel comments:
 
 ```
 # >>> scripts pack: BEGIN <<<
-alias docheckout="/var/folders/.../T/custom-scripts/docheckout.js"
-alias docommit="/var/folders/.../T/custom-scripts/docommit.js"
-alias doconnect="/var/folders/.../T/custom-scripts/doconnect.js"
-alias domr="/var/folders/.../T/custom-scripts/domr.js"
+alias docheckout="/Users/<you>/.local/bin/custom_scripts/docheckout.js"
+alias docommit="/Users/<you>/.local/bin/custom_scripts/docommit.js"
+alias doconnect="/Users/<you>/.local/bin/custom_scripts/doconnect.js"
+alias domr="/Users/<you>/.local/bin/custom_scripts/domr.js"
 # >>> scripts pack: END <<<
 ```
 

@@ -26,11 +26,11 @@ pnpm run pack
 
 (Note: `pnpm run pack` — bare `pnpm pack` is shadowed by pnpm's built-in tarball command.)
 
-The install dir name comes from `SCRIPTS_PACK_DIR` (in `.env` or process env), defaulting to `custom-scripts`. It is always created under `os.tmpdir()`.
+The install dir name comes from `SCRIPTS_PACK_DIR` (in `.env` or process env), defaulting to `custom_scripts`. It is always created under `~/.local/bin/`.
 
 This:
 1. Resolves & validates the dir name from env (or default).
-2. Cleans the target dir under macOS `os.tmpdir()/<dirname>`.
+2. Cleans the target dir at `~/.local/bin/<dirname>`.
 3. Compiles every `src/do-*.ts` to that dir as a self-contained ESM bundle.
 4. Removes the previously installed block from `~/.zshrc` and re-adds aliases pointing at the new dir.
 

@@ -3,7 +3,7 @@
  * pack/build pipeline.
  *
  * Compiles every `src/do-*.ts` script into a self-contained executable file
- * inside `os.tmpdir()/<dirname>` and refreshes a delimited block in
+ * inside `~/.local/bin/<dirname>` and refreshes a delimited block in
  * `~/.zshrc` with one alias per script.
  *
  * Usage:
@@ -72,7 +72,7 @@ const BLOCK_END = '# >>> scripts pack: END <<<';
 const SAFE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 const SHEBANG = '#!/usr/bin/env node\n';
 const PACK_DIR_ENV_VAR = 'SCRIPTS_PACK_DIR';
-const DEFAULT_PACK_DIR = 'custom-scripts';
+const DEFAULT_PACK_DIR = 'custom_scripts';
 
 // ─────────────────────────────────────────────────────────────
 // Paths (resolve relative to this file, regardless of cwd)
@@ -103,7 +103,7 @@ interface LivrErrorMap {
 /**
  * Resolves the install dir name from `process.env[SCRIPTS_PACK_DIR_ENV_VAR]`,
  * falling back to `DEFAULT_PACK_DIR`. Validates the resolved value via LIVR
- * so a stray env value with unsafe characters can't escape the tmp dir.
+ * so a stray env value with unsafe characters can't escape the install root.
  */
 const resolveDirName = (): string => {
   const envValue = process.env[PACK_DIR_ENV_VAR]?.trim();
@@ -343,7 +343,7 @@ const main = async (): Promise<void> => {
   dotenv.config({ path: path.join(PROJECT_ROOT, '.env'), quiet: true });
 
   const dirname = resolveDirName();
-  const targetDir = path.join(os.tmpdir(), dirname);
+  const targetDir = path.join(os.homedir(), '.local', 'bin', dirname);
   const dirSource = process.env[PACK_DIR_ENV_VAR]?.trim()
     ? `${PACK_DIR_ENV_VAR}=${dirname}`
     : `default "${dirname}"`;
