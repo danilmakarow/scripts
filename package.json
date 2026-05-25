@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "pack": "tsx src/config/build.ts",
+    "deliver": "tsx src/config/build.ts",
     "build:check": "tsc --noEmit"
   },
   "keywords": [],
@@ -14,19 +14,34 @@
   "license": "ISC",
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
+    "@alcalzone/ansi-tokenize": "^0.3.0",
     "@anthropic-ai/sdk": "^0.40.1",
+    "bidi-js": "^1.0.3",
     "chalk": "^5.4.1",
+    "cli-boxes": "^4.0.1",
     "dotenv": "^16.4.7",
+    "emoji-regex": "^10.6.0",
     "execa": "^9.5.2",
+    "get-east-asian-width": "^1.6.0",
+    "indent-string": "^5.0.0",
     "livr": "^2.5.0",
     "log-update": "^6.1.0",
     "ora": "^8.2.0",
-    "simple-git": "^3.27.0"
+    "react": "^19.2.6",
+    "react-reconciler": "^0.31.0",
+    "semver": "^7.8.1",
+    "simple-git": "^3.27.0",
+    "strip-ansi": "^7.2.0",
+    "wrap-ansi": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/react": "^19.2.15",
+    "@types/react-reconciler": "^0.33.0",
+    "@types/semver": "^7.7.1",
     "esbuild": "^0.28.0",
     "tsx": "^4.19.2",
+    "type-fest": "^5.6.0",
     "typescript": "^5.7.3"
   }
 }

@@ -27,8 +27,10 @@ import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import Anthropic from '@anthropic-ai/sdk';
 
-import { log, symbols, theme } from './common/logger';
+import { log } from './common/logger';
 import { runCommand } from './common/command-runner';
+import { runScript, runStep, reportError, fmt } from './common/tui/index';
+import { consumeDebugFlag } from './common/cli-flags';
 import { loadEnv, validateEnv } from './common/env';
 import { SuggestionError } from './common/errors';
 import { printUsage } from './common/usage';
@@ -336,6 +338,8 @@ const showUsage = (): void => {
 // ─────────────────────────────────────────────────────────────
 /** Entry point: validates state, drafts the commit, pushes, and opens an MR/PR. */
 const main = async (): Promise<void> => {
+  // Consume the global -d/--debug flag before parsing this script's own args.
+  consumeDebugFlag();
   const args = process.argv.slice(2);
   if (args.includes('-h') || args.includes('--help')) {
     showUsage();
@@ -354,146 +358,104 @@ const main = async (): Promise<void> => {
 
   const currentBranch = await getCurrentBranch(cwd);
   const wasOnMaster = isMasterBranch(currentBranch);
+  const subtitle =
+    fmt`${cwd} · ${currentBranch}` + (wasOnMaster ? ' · will create new branch' : '');
 
-  log.blank();
-  console.log(theme.bold('  domr'));
-  console.log(`  ${theme.dim('branch:')} ${theme.highlight(currentBranch)}${
-    wasOnMaster ? ` ${symbols.arrow} ${theme.dim('will create new branch')}` : ''
-  }`);
-  log.blank();
+  await runScript({ name: 'domr', subtitle }, async () => {
+    // ── Phase 2: Stage & capture diff ──
+    await runCommand('git add -A', { cwd, description: 'Staging all changes', doneDescription: 'Staged all changes' });
 
-  // ── Phase 2: Stage & capture diff ──
-  await runCommand('git add -A', { cwd, description: 'Staging all changes' });
-
-  const diff = await captureStagedDiff(cwd);
-  if (diff.trim().length === 0) {
-    log.info('No staged changes after `git add -A` — nothing to commit.');
-    return;
-  }
-
-  // ── Phase 3: Ask Claude Haiku for a commit message (+ branch name) ──
-  log.step(`Asking ${theme.highlight('claude-haiku-4-5')} for ${
-    wasOnMaster ? 'a branch name + commit message' : 'a commit message'
-  }`);
-  const suggestion = await requestSuggestion(env.ANTHROPIC_API_KEY, diff, wasOnMaster);
-  const { subject: commitSubject, body: commitBody } = splitCommitMessage(suggestion.commitMessage);
-
-  log.success(`Commit subject: ${theme.highlight(commitSubject)}`);
-  if (suggestion.branchName) {
-    log.success(`Suggested branch: ${theme.highlight(suggestion.branchName)}`);
-  }
-
-  // ── Phase 4: Branch (when on master) ──
-  let targetBranch = currentBranch;
-  if (wasOnMaster) {
-    const desiredName = suggestion.branchName;
-    if (!desiredName) {
-      throw new Error('Internal error: missing branch name suggestion while on master');
+    const diff = await captureStagedDiff(cwd);
+    if (diff.trim().length === 0) {
+      log.info('No staged changes after `git add -A` — nothing to commit.');
+      return;
     }
-    targetBranch = await resolveAvailableBranchName(cwd, desiredName);
-    await runCommand(`git checkout -b ${targetBranch}`, {
-      cwd,
-      description: `Creating branch ${targetBranch}`,
-    });
-  }
 
-  // ── Phase 5: Commit ──
-  const messageFile = writeCommitMessageFile(suggestion.commitMessage);
-  try {
-    await runCommand(`git commit -F ${JSON.stringify(messageFile)}`, {
-      cwd,
-      description: 'Creating commit',
-    });
-  } finally {
-    try {
-      fs.unlinkSync(messageFile);
-    } catch {
-      // best-effort cleanup; the OS will reap tmpdir eventually
-    }
-  }
-
-  // ── Phase 6: Push ──
-  const gitClient = new GitClient(env.GIT_ACCESS_TOKEN);
-  await gitClient.pushBranch(cwd, targetBranch);
-  log.success(`Pushed ${theme.highlight(targetBranch)} to origin`);
-
-  // ── Phase 7: Find or create MR/PR ──
-  const remote = await gitClient.describeRemote(cwd);
-  if (remote.host === 'unknown') {
-    log.warning(
-      `Unsupported git host for remote "${remote.remoteUrl}" — skipping MR/PR creation.`,
+    // ── Phase 3: Ask Claude Haiku for a commit message (+ branch name) ──
+    const aiLabel = wasOnMaster
+      ? { active: fmt`Asking ${HAIKU_MODEL_ID} for a branch name + commit message`, done: fmt`Generated branch name + commit message via ${HAIKU_MODEL_ID}` }
+      : { active: fmt`Asking ${HAIKU_MODEL_ID} for a commit message`, done: fmt`Generated commit message via ${HAIKU_MODEL_ID}` };
+    const suggestion = await runStep(aiLabel, async () =>
+      requestSuggestion(env.ANTHROPIC_API_KEY, diff, wasOnMaster),
     );
-    log.blank();
-    return;
-  }
+    const { subject: commitSubject, body: commitBody } = splitCommitMessage(suggestion.commitMessage);
 
-  const host: GitHost = remote.host;
-  log.step(
-    `Checking ${theme.highlight(host)} for an existing MR/PR from ${theme.highlight(targetBranch)}`,
-  );
+    log.success(fmt`Commit subject: ${commitSubject}`);
+    if (suggestion.branchName) {
+      log.success(fmt`Suggested branch: ${suggestion.branchName}`);
+    }
 
-  const existing = await gitClient.findOpenMergeRequest(host, remote.projectPath, targetBranch);
-  if (existing) {
-    log.blank();
-    log.success(`Open ${host === 'gitlab' ? 'merge request' : 'pull request'} already exists`);
-    console.log(`  ${theme.highlight(existing.url)}`);
-    log.blank();
-    return;
-  }
+    // ── Phase 4: Branch (when on master) ──
+    let targetBranch = currentBranch;
+    if (wasOnMaster) {
+      const desiredName = suggestion.branchName;
+      if (!desiredName) {
+        throw new Error('Internal error: missing branch name suggestion while on master');
+      }
+      targetBranch = await resolveAvailableBranchName(cwd, desiredName);
+      await runCommand(`git checkout -b ${targetBranch}`, {
+        cwd,
+        description: fmt`Creating branch ${targetBranch}`,
+        doneDescription: fmt`Created branch ${targetBranch}`,
+      });
+    }
 
-  log.step(`Creating new ${host === 'gitlab' ? 'merge request' : 'pull request'}`);
-  const created = await gitClient.createMergeRequest(host, remote.projectPath, {
-    sourceBranch: targetBranch,
-    title: commitSubject,
-    description: commitBody.length > 0 ? commitBody : commitSubject,
+    // ── Phase 5: Commit ──
+    const messageFile = writeCommitMessageFile(suggestion.commitMessage);
+    try {
+      await runCommand(`git commit -F ${JSON.stringify(messageFile)}`, {
+        cwd,
+        description: 'Creating commit',
+        doneDescription: 'Created commit',
+      });
+    } finally {
+      try {
+        fs.unlinkSync(messageFile);
+      } catch {
+        // best-effort cleanup; the OS will reap tmpdir eventually
+      }
+    }
+
+    // ── Phase 6: Push ──
+    const gitClient = new GitClient(env.GIT_ACCESS_TOKEN);
+    await gitClient.pushBranch(cwd, targetBranch);
+    log.success(fmt`Pushed ${targetBranch} to origin`);
+
+    // ── Phase 7: Find or create MR/PR ──
+    const remote = await gitClient.describeRemote(cwd);
+    if (remote.host === 'unknown') {
+      log.warning(
+        `Unsupported git host for remote "${remote.remoteUrl}" — skipping MR/PR creation.`,
+      );
+      return;
+    }
+
+    const host: GitHost = remote.host;
+    const mrLabel = host === 'gitlab' ? 'merge request' : 'pull request';
+    const suggestion2 = await runStep(
+      { active: fmt`Checking ${host} for an existing MR/PR from ${targetBranch}`, done: fmt`Checked ${host} for existing MR/PR from ${targetBranch}` },
+      async () => gitClient.findOpenMergeRequest(host, remote.projectPath, targetBranch),
+    );
+
+    if (suggestion2) {
+      log.success(fmt`Open ${mrLabel} already exists: ${suggestion2.url}`);
+      return;
+    }
+
+    const created = await runStep(
+      { active: `Creating new ${mrLabel}`, done: `Created new ${mrLabel}` },
+      async () => gitClient.createMergeRequest(host, remote.projectPath, {
+        sourceBranch: targetBranch,
+        title: commitSubject,
+        description: commitBody.length > 0 ? commitBody : commitSubject,
+      }),
+    );
+
+    log.success(fmt`Opened ${mrLabel}: ${created.url}`);
   });
-
-  log.blank();
-  log.success(`Opened ${host === 'gitlab' ? 'merge request' : 'pull request'}`);
-  console.log(`  ${theme.highlight(created.url)}`);
-  log.blank();
 };
 
 // ─────────────────────────────────────────────────────────────
-// Error reporter
+// Error reporter (pre-flight only; in-run failures are reported by runScript)
 // ─────────────────────────────────────────────────────────────
-main().catch((err: unknown) => {
-  log.blank();
-  const message = err instanceof Error ? err.message : String(err);
-  log.error(message);
-
-  if (SuggestionError.is(err)) {
-    log.blank();
-    console.log(theme.dim(`  ${err.suggestionLabel}`));
-    for (const suggestion of err.suggestions) {
-      console.log(`    ${theme.dim('•')} ${suggestion}`);
-    }
-  } else if (GitClientError.is(err)) {
-    log.blank();
-    console.log(theme.dim('  HTTP error details:'));
-    console.log(`    ${theme.dim('status:')} ${err.status}`);
-    if (err.body.trim().length > 0) {
-      err.body
-        .split('\n')
-        .slice(0, 5)
-        .forEach((line) => {
-          if (line.trim()) console.log(`    ${theme.dim(line)}`);
-        });
-    }
-  } else if (err instanceof Error && 'stderr' in err && typeof (err as { stderr?: unknown }).stderr === 'string') {
-    const stderr = (err as { stderr: string }).stderr;
-    if (stderr.trim().length > 0) {
-      console.log();
-      console.log(theme.dim('  Error details:'));
-      stderr
-        .split('\n')
-        .slice(0, 5)
-        .forEach((line) => {
-          if (line.trim()) console.log(`    ${theme.dim(line)}`);
-        });
-    }
-  }
-
-  log.blank();
-  process.exit(1);
-});
+main().catch(reportError);

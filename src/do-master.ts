@@ -23,10 +23,11 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { log, theme } from './common/logger';
+import { log } from './common/logger';
 import { runCommand } from './common/command-runner';
+import { runScript, reportError, fmt } from './common/tui/index';
+import { consumeDebugFlag } from './common/cli-flags';
 import { loadEnv } from './common/env';
-import { SuggestionError } from './common/errors';
 import { getDirectories, matchDirectory } from './common/fs-helpers';
 import { printUsage } from './common/usage';
 import {
@@ -93,6 +94,8 @@ const showUsage = (): void => {
 // ─────────────────────────────────────────────────────────────
 /** Entry point: stashes if needed, switches to master/main, pulls. */
 const main = async (): Promise<void> => {
+  // Consume the global -d/--debug flag before parsing this script's own args.
+  consumeDebugFlag();
   const args = process.argv.slice(2);
   if (args.includes('-h') || args.includes('--help')) {
     showUsage();
@@ -105,84 +108,50 @@ const main = async (): Promise<void> => {
 
   const cwd = resolveProjectCwd(args[0]);
 
-  // ── Phase 1: Sanity ──
+  // ── Sanity (pre-flight, before the dashboard mounts) ──
   await assertGitRepo(cwd);
   const currentBranch = await getCurrentBranch(cwd);
   const masterBranch = await findMasterBranch(cwd);
   const needsStash = await hasChanges(cwd);
+  const subtitle =
+    fmt`${cwd} · ${currentBranch} → ${masterBranch}` + (needsStash ? ' · will stash & keep' : '');
 
-  log.blank();
-  console.log(theme.bold('  domaster'));
-  console.log(`  ${theme.dim('cwd:')}    ${theme.highlight(cwd)}`);
-  console.log(`  ${theme.dim('branch:')} ${theme.highlight(currentBranch)}`);
-  console.log(`  ${theme.dim('master:')} ${theme.highlight(masterBranch)}`);
-  if (needsStash) {
-    console.log(`  ${theme.dim('local:')}  ${theme.warning('uncommitted changes — will stash & keep')}`);
-  }
-  log.blank();
+  await runScript({ name: 'domaster', subtitle }, async () => {
+    // ── Phase 2: Stash local work (kept, not popped) ──
+    let stashed = false;
+    if (needsStash) {
+      await runCommand(`git stash push -u -m ${JSON.stringify(STASH_LABEL)}`, {
+        cwd,
+        description: 'Stashing local changes',
+        doneDescription: 'Stashed local changes',
+      });
+      stashed = true;
+    }
 
-  // ── Phase 2: Stash local work (kept, not popped) ──
-  let stashed = false;
-  if (needsStash) {
-    await runCommand(`git stash push -u -m ${JSON.stringify(STASH_LABEL)}`, {
+    // ── Phase 3: Checkout master/main if not already there ──
+    if (currentBranch !== masterBranch) {
+      await runCommand(`git checkout ${masterBranch}`, {
+        cwd,
+        description: fmt`Checking out ${masterBranch}`,
+        doneDescription: fmt`Checked out ${masterBranch}`,
+      });
+    }
+
+    // ── Phase 4: Pull ──
+    await runCommand('git pull', {
       cwd,
-      description: 'Stashing local changes',
+      description: fmt`Pulling ${masterBranch}`,
+      doneDescription: fmt`Pulled ${masterBranch}`,
     });
-    stashed = true;
-  }
 
-  // ── Phase 3: Checkout master/main if not already there ──
-  if (currentBranch !== masterBranch) {
-    await runCommand(`git checkout ${masterBranch}`, {
-      cwd,
-      description: `Checking out ${masterBranch}`,
-    });
-  }
-
-  // ── Phase 4: Pull ──
-  await runCommand('git pull', {
-    cwd,
-    description: `Pulling ${masterBranch}`,
+    log.success(fmt`domaster complete — on ${masterBranch}`);
+    if (stashed) {
+      log.info(`"${STASH_LABEL}" left in git stash list — run git stash pop to restore`);
+    }
   });
-
-  log.blank();
-  log.success(`domaster complete — on ${theme.highlight(masterBranch)}`);
-  if (stashed) {
-    console.log(
-      `  ${theme.dim('stash:')}  ${theme.warning(`"${STASH_LABEL}" left in git stash list — run`)} ${theme.highlight('git stash pop')} ${theme.warning('to restore')}`,
-    );
-  }
-  log.blank();
 };
 
 // ─────────────────────────────────────────────────────────────
-// Error reporter
+// Error reporter (pre-flight only; in-run failures are reported by runScript)
 // ─────────────────────────────────────────────────────────────
-main().catch((err: unknown) => {
-  log.blank();
-  const message = err instanceof Error ? err.message : String(err);
-  log.error(message);
-
-  if (SuggestionError.is(err)) {
-    log.blank();
-    console.log(theme.dim(`  ${err.suggestionLabel}`));
-    for (const suggestion of err.suggestions) {
-      console.log(`    ${theme.dim('•')} ${suggestion}`);
-    }
-  } else if (err instanceof Error && 'stderr' in err && typeof (err as { stderr?: unknown }).stderr === 'string') {
-    const stderr = (err as { stderr: string }).stderr;
-    if (stderr.trim().length > 0) {
-      console.log();
-      console.log(theme.dim('  Error details:'));
-      stderr
-        .split('\n')
-        .slice(0, 5)
-        .forEach((line) => {
-          if (line.trim()) console.log(`    ${theme.dim(line)}`);
-        });
-    }
-  }
-
-  log.blank();
-  process.exit(1);
-});
+main().catch(reportError);

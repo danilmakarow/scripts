@@ -20,49 +20,10 @@ import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import LIVR from 'livr';
-import chalk from 'chalk';
 import dotenv from 'dotenv';
 
-// ─────────────────────────────────────────────────────────────
-// Theme & Logger (inline; migrate to src/common/logger.ts later)
-// ─────────────────────────────────────────────────────────────
-const theme = {
-  success: chalk.green,
-  error: chalk.red,
-  warning: chalk.yellow,
-  info: chalk.blue,
-  dim: chalk.dim,
-  bold: chalk.bold,
-  highlight: chalk.cyan,
-};
-
-const symbols = {
-  success: chalk.green('✔'),
-  error: chalk.red('✖'),
-  warning: chalk.yellow('⚠'),
-  info: chalk.blue('ℹ'),
-  arrow: chalk.dim('→'),
-};
-
-type LogFn = (message: string) => void;
-
-interface Logger {
-  readonly info: LogFn;
-  readonly success: LogFn;
-  readonly error: LogFn;
-  readonly warning: LogFn;
-  readonly step: LogFn;
-  readonly blank: () => void;
-}
-
-const log: Logger = {
-  info: (message) => console.log(`${symbols.info} ${message}`),
-  success: (message) => console.log(`${symbols.success} ${theme.success(message)}`),
-  error: (message) => console.error(`${symbols.error} ${theme.error(message)}`),
-  warning: (message) => console.log(`${symbols.warning} ${theme.warning(message)}`),
-  step: (message) => console.log(`${symbols.arrow} ${message}`),
-  blank: () => console.log(),
-};
+import { log, theme, symbols } from '../common/logger';
+import { runScript, runStep, reportError } from '../common/tui/index';
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -342,46 +303,36 @@ const main = async (): Promise<void> => {
   // Load .env from the project root so SCRIPTS_PACK_DIR can be configured there.
   dotenv.config({ path: path.join(PROJECT_ROOT, '.env'), quiet: true });
 
+  // Pre-flight: resolve + validate the install dir name (may exit on bad input).
   const dirname = resolveDirName();
   const targetDir = path.join(os.homedir(), '.local', 'bin', dirname);
   const dirSource = process.env[PACK_DIR_ENV_VAR]?.trim()
     ? `${PACK_DIR_ENV_VAR}=${dirname}`
     : `default "${dirname}"`;
-  log.info(`Install dir name: ${theme.highlight(dirname)} ${theme.dim(`(${dirSource})`)}`);
 
-  log.step(`Preparing target dir: ${theme.highlight(targetDir)}`);
-  await prepareTargetDir(targetDir);
-
-  log.step(`Discovering ${theme.highlight('src/do-*.ts')} scripts`);
-  const sources = await discoverScripts();
-  log.success(`Found ${sources.length} script${sources.length === 1 ? '' : 's'}`);
-
-  log.step(`Copying ${theme.highlight('.env')} to target dir`);
-  await copyEnvFile(targetDir);
-
-  log.step('Compiling scripts');
-  await writeTargetPackageJson(targetDir);
   const compiled: CompiledScript[] = [];
-  for (const sourcePath of sources) {
-    const result = await compileScript(sourcePath, targetDir);
-    compiled.push(result);
-    log.success(`compiled ${theme.highlight(path.basename(sourcePath))} → ${theme.dim(result.outputPath)}`);
-  }
 
-  log.step(`Updating ${theme.highlight('~/.zshrc')} alias block`);
-  await updateZshrc(compiled);
-  log.success('~/.zshrc updated');
+  await runScript({ name: 'pack', subtitle: `${targetDir} (${dirSource})` }, async () => {
+    await runStep('Preparing target dir', () => prepareTargetDir(targetDir));
 
+    const sources = await runStep('Discovering src/do-*.ts scripts', () => discoverScripts());
+    log.success(`Found ${sources.length} script${sources.length === 1 ? '' : 's'}`);
+
+    await runStep('Copying .env to target dir', () => copyEnvFile(targetDir));
+    await writeTargetPackageJson(targetDir);
+
+    for (const sourcePath of sources) {
+      const result = await runStep(`Compiling ${path.basename(sourcePath)}`, () =>
+        compileScript(sourcePath, targetDir),
+      );
+      compiled.push(result);
+    }
+
+    await runStep('Updating ~/.zshrc alias block', () => updateZshrc(compiled));
+  });
+
+  // Printed after the UI is released, so it stays in the scrollback.
   printSummary(targetDir, compiled);
 };
 
-main().catch((err: unknown) => {
-  log.blank();
-  const message = err instanceof Error ? err.message : String(err);
-  log.error(message);
-  if (err instanceof Error && err.stack) {
-    console.error(theme.dim(err.stack.split('\n').slice(1, 4).join('\n')));
-  }
-  log.blank();
-  process.exit(1);
-});
+main().catch(reportError);

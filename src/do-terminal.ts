@@ -14,9 +14,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 
-import { log, theme } from './common/logger';
+import { log } from './common/logger';
 import { loadEnv } from './common/env';
 import { printUsage } from './common/usage';
+import { runScript, reportError, fmt } from './common/tui/index';
+import { consumeDebugFlag } from './common/cli-flags';
 
 // ─────────────────────────────────────────────────────────────
 // Bootstrap — load .env (kept for parity with other scripts even though
@@ -99,6 +101,8 @@ const showUsage = (): void => {
 // ─────────────────────────────────────────────────────────────
 /** Entry point: validates the count and opens that many Terminal windows. */
 const main = async (): Promise<void> => {
+  // Consume the global -d/--debug flag before parsing this script's own args.
+  consumeDebugFlag();
   const args = process.argv.slice(2);
   if (args.includes('-h') || args.includes('--help')) {
     showUsage();
@@ -111,43 +115,17 @@ const main = async (): Promise<void> => {
 
   const count = parseCount(args[0]);
   const cwd = process.cwd();
+  const subtitle = fmt`${cwd}` + ` · opening ${count} window${count === 1 ? '' : 's'}`;
 
-  log.blank();
-  console.log(theme.bold('  doterminal'));
-  console.log(`  ${theme.dim('count:')} ${theme.highlight(String(count))}`);
-  console.log(`  ${theme.dim('cwd:')}   ${theme.highlight(cwd)}`);
-  log.blank();
-
-  for (let windowIndex = 0; windowIndex < count; windowIndex += 1) {
-    await openTerminalWindow(cwd);
-    log.success(`Opened window ${windowIndex + 1} of ${count}`);
-  }
-
-  log.blank();
+  await runScript({ name: 'doterminal', subtitle }, async () => {
+    for (let windowIndex = 0; windowIndex < count; windowIndex += 1) {
+      await openTerminalWindow(cwd);
+      log.success(fmt`Opened window ${windowIndex + 1} of ${count}`);
+    }
+  });
 };
 
 // ─────────────────────────────────────────────────────────────
-// Error reporter
+// Error reporter (pre-flight only; in-run failures are reported by runScript)
 // ─────────────────────────────────────────────────────────────
-main().catch((err: unknown) => {
-  log.blank();
-  const message = err instanceof Error ? err.message : String(err);
-  log.error(message);
-
-  if (err instanceof Error && 'stderr' in err && typeof (err as { stderr?: unknown }).stderr === 'string') {
-    const stderr = (err as { stderr: string }).stderr;
-    if (stderr.trim().length > 0) {
-      console.log();
-      console.log(theme.dim('  Error details:'));
-      stderr
-        .split('\n')
-        .slice(0, 5)
-        .forEach((line) => {
-          if (line.trim()) console.log(`    ${theme.dim(line)}`);
-        });
-    }
-  }
-
-  log.blank();
-  process.exit(1);
-});
+main().catch(reportError);

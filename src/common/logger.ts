@@ -6,6 +6,8 @@
  */
 
 import chalk from 'chalk';
+import { getActiveRun } from './tui/index';
+import { formatForConsole } from './tui/format';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -56,9 +58,9 @@ export const theme: Theme = {
 
 /** Pre-colored single-character glyphs used as line prefixes by the logger. */
 export const symbols: Symbols = {
-  success: chalk.green('✔'),
-  error: chalk.red('✖'),
-  warning: chalk.yellow('⚠'),
+  success: chalk.green('✓'),
+  error: chalk.red('✗'),
+  warning: chalk.yellow('▲'),
   info: chalk.blue('ℹ'),
   arrow: chalk.dim('→'),
   bullet: chalk.dim('│'),
@@ -67,12 +69,38 @@ export const symbols: Symbols = {
 // ─────────────────────────────────────────────────────────────
 // Logger
 // ─────────────────────────────────────────────────────────────
-/** One-shot console logger with consistent prefixes/colors across all scripts. */
+/**
+ * One-shot logger. When a full-screen run is active it records lines into the
+ * dashboard; otherwise it falls back to consistent console output. `blank` is
+ * a no-op under the dashboard (which manages its own layout).
+ */
 export const log: Logger = {
-  info: (message) => console.log(`${symbols.info} ${message}`),
-  success: (message) => console.log(`${symbols.success} ${theme.success(message)}`),
-  error: (message) => console.error(`${symbols.error} ${theme.error(message)}`),
-  warning: (message) => console.log(`${symbols.warning} ${theme.warning(message)}`),
-  step: (message) => console.log(`${symbols.arrow} ${message}`),
-  blank: () => console.log(),
+  info: (message) => {
+    const run = getActiveRun();
+    if (run) run.store.log('info', message);
+    else console.log(`${symbols.info} ${formatForConsole(message)}`);
+  },
+  success: (message) => {
+    const run = getActiveRun();
+    if (run) run.store.log('success', message);
+    else console.log(`${symbols.success} ${theme.success(formatForConsole(message))}`);
+  },
+  error: (message) => {
+    const run = getActiveRun();
+    if (run) run.store.log('error', message);
+    else console.error(`${symbols.error} ${theme.error(formatForConsole(message))}`);
+  },
+  warning: (message) => {
+    const run = getActiveRun();
+    if (run) run.store.log('warning', message);
+    else console.log(`${symbols.warning} ${theme.warning(formatForConsole(message))}`);
+  },
+  step: (message) => {
+    const run = getActiveRun();
+    if (run) run.store.log('step', message);
+    else console.log(`${symbols.arrow} ${formatForConsole(message)}`);
+  },
+  blank: () => {
+    if (!getActiveRun()) console.log();
+  },
 };

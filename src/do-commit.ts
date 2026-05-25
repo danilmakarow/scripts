@@ -24,8 +24,10 @@ import { fileURLToPath } from 'node:url';
 
 import Anthropic from '@anthropic-ai/sdk';
 
-import { log, theme } from './common/logger';
+import { log } from './common/logger';
 import { runCommand } from './common/command-runner';
+import { runScript, runStep, reportError, fmt } from './common/tui/index';
+import { consumeDebugFlag } from './common/cli-flags';
 import { loadEnv, validateEnv } from './common/env';
 import { assertGitRepo, hasChanges } from './common/git-utils';
 import { printUsage } from './common/usage';
@@ -114,10 +116,12 @@ const captureDiffPayload = async (cwd: string): Promise<DiffPayload> => {
   const statusResult = await runCommand('git status --porcelain', {
     cwd,
     description: 'Reading git status',
+    doneDescription: 'Read git status',
   });
   const diffResult = await runCommand('git diff --cached', {
     cwd,
     description: 'Reading staged diff',
+    doneDescription: 'Read staged diff',
   });
 
   const status = typeof statusResult.stdout === 'string' ? statusResult.stdout : '';
@@ -212,8 +216,6 @@ const generateCommitMessage = async (
 ): Promise<string> => {
   const client = new Anthropic({ apiKey });
 
-  log.step(`Asking ${theme.highlight(HAIKU_MODEL_ID)} for a commit message`);
-
   const response = await client.messages.create({
     model: HAIKU_MODEL_ID,
     max_tokens: HAIKU_MAX_OUTPUT_TOKENS,
@@ -245,20 +247,19 @@ const commitWithMessage = async (cwd: string, message: string): Promise<void> =>
     await runCommand(`git commit -F ${JSON.stringify(tmpFile)}`, {
       cwd,
       description: 'Committing',
+      doneDescription: 'Committed',
     });
   } finally {
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }
 };
 
-/** Renders the generated message inside a labelled block before committing. */
+/** Logs the generated message before committing. */
 const previewMessage = (message: string): void => {
-  log.blank();
-  console.log(theme.dim('  Generated commit message:'));
+  log.info('Generated commit message:');
   for (const line of message.trim().split('\n')) {
-    console.log(`    ${theme.highlight(line)}`);
+    log.info(`  ${line}`);
   }
-  log.blank();
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -266,6 +267,8 @@ const previewMessage = (message: string): void => {
 // ─────────────────────────────────────────────────────────────
 /** Entry point — orchestrates validation, AI call, commit, and push. */
 const main = async (): Promise<void> => {
+  // Consume the global -d/--debug flag before parsing this script's own args.
+  consumeDebugFlag();
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) {
     showUsage();
@@ -282,55 +285,41 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  await runCommand('git add -A', {
-    cwd,
-    description: 'Staging all changes',
+  const subtitle = fmt`${cwd}`;
+
+  await runScript({ name: 'docommit', subtitle }, async () => {
+    await runCommand('git add -A', {
+      cwd,
+      description: 'Staging all changes',
+      doneDescription: 'Staged all changes',
+    });
+
+    const payload = await captureDiffPayload(cwd);
+    if (payload.diff.trim().length === 0 && payload.status.trim().length === 0) {
+      // Defensive: hasChanges said dirty, but the staged diff is empty (e.g. a
+      // mode-only change that vanished after `git add -A`). Bail cleanly.
+      log.info('No staged changes after `git add -A`; nothing to commit.');
+      return;
+    }
+
+    const message = await runStep(
+      { active: fmt`Asking ${HAIKU_MODEL_ID} for a commit message`, done: fmt`Generated commit message via ${HAIKU_MODEL_ID}` },
+      async () => generateCommitMessage(env.ANTHROPIC_API_KEY, payload),
+    );
+    previewMessage(message);
+
+    await commitWithMessage(cwd, message);
+    await runCommand('git push', {
+      cwd,
+      description: 'Pushing to remote',
+      doneDescription: 'Pushed to remote',
+    });
+
+    log.success('Committed and pushed');
   });
-
-  const payload = await captureDiffPayload(cwd);
-  if (payload.diff.trim().length === 0 && payload.status.trim().length === 0) {
-    // Defensive: hasChanges said dirty, but the staged diff is empty (e.g. a
-    // mode-only change that vanished after `git add -A`). Bail cleanly.
-    log.info('No staged changes after `git add -A`; nothing to commit.');
-    return;
-  }
-
-  const message = await generateCommitMessage(env.ANTHROPIC_API_KEY, payload);
-  previewMessage(message);
-
-  await commitWithMessage(cwd, message);
-  await runCommand('git push', {
-    cwd,
-    description: 'Pushing to remote',
-  });
-
-  log.blank();
-  log.success('Committed and pushed');
-  log.blank();
 };
 
 // ─────────────────────────────────────────────────────────────
-// Error reporter (mirrors do-connect.ts)
+// Error reporter (pre-flight only; in-run failures are reported by runScript)
 // ─────────────────────────────────────────────────────────────
-main().catch((err: unknown) => {
-  log.blank();
-  const message = err instanceof Error ? err.message : String(err);
-  log.error(message);
-
-  if (err instanceof Error && 'stderr' in err && typeof (err as { stderr?: unknown }).stderr === 'string') {
-    const stderr = (err as { stderr: string }).stderr;
-    if (stderr.trim().length > 0) {
-      console.log();
-      console.log(theme.dim('  Error details:'));
-      stderr
-        .split('\n')
-        .slice(0, 5)
-        .forEach((line) => {
-          if (line.trim()) console.log(`    ${theme.dim(line)}`);
-        });
-    }
-  }
-
-  log.blank();
-  process.exit(1);
-});
+main().catch(reportError);

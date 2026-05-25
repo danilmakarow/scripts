@@ -33,8 +33,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { log, symbols, theme } from './common/logger';
+import { log } from './common/logger';
 import { runCommand } from './common/command-runner';
+import { runScript, reportError, fmt } from './common/tui/index';
+import { consumeDebugFlag } from './common/cli-flags';
 import { loadEnv, validateEnv } from './common/env';
 import { SuggestionError } from './common/errors';
 import { getDirectories, pathExists, readJson, writeJson } from './common/fs-helpers';
@@ -483,6 +485,8 @@ const showUsage = (): void => {
 // ─────────────────────────────────────────────────────────────
 /** Entry point: resolves dirs, validates deps, then walks the chain. */
 const main = async (): Promise<void> => {
+  // Consume the global -d/--debug flag before parsing this script's own args.
+  consumeDebugFlag();
   const { addIfMissing, depSection, positional } = parseArgs(process.argv.slice(2));
 
   if (positional.length < 2) {
@@ -518,162 +522,125 @@ const main = async (): Promise<void> => {
     chain.push({ sourceDir, targetDir, sourcePath, targetPath, packageName });
   }
 
-  log.success('All directories and dependencies validated');
+  const subtitle = fmt`${resolvedDirs.join(' → ')}`;
 
-  // ── Phase 3: Execute chain ──
-  log.blank();
-  if (resolvedDirs.length === 2) {
-    console.log(theme.bold('  Updating package'));
-    console.log(`  ${theme.highlight(resolvedDirs[0])} ${symbols.arrow} ${theme.highlight(resolvedDirs[1])}`);
-  } else {
-    console.log(theme.bold('  Updating package chain'));
-    console.log(`  ${resolvedDirs.map((dir) => theme.highlight(dir)).join(` ${symbols.arrow} `)}`);
-  }
-  log.blank();
+  await runScript({ name: 'doconnect', subtitle }, async () => {
+    log.success('All directories and dependencies validated');
 
-  const builtPackages: BuiltPackage[] = [];
+    const builtPackages: BuiltPackage[] = [];
 
-  for (let targetIndex = 1; targetIndex < resolvedDirs.length; targetIndex += 1) {
-    const sourceDir = resolvedDirs[targetIndex - 1];
-    const targetDir = resolvedDirs[targetIndex];
-    const sourcePath = path.join(PROJECTS_DIR, sourceDir);
-    const targetPath = path.join(PROJECTS_DIR, targetDir);
+    for (let targetIndex = 1; targetIndex < resolvedDirs.length; targetIndex += 1) {
+      const sourceDir = resolvedDirs[targetIndex - 1];
+      const targetDir = resolvedDirs[targetIndex];
+      const sourcePath = path.join(PROJECTS_DIR, sourceDir);
+      const targetPath = path.join(PROJECTS_DIR, targetDir);
 
-    if (resolvedDirs.length > 2) {
-      const prefix = resolvedDirs.slice(0, targetIndex).join(', ');
-      console.log(theme.bold(`  Step ${targetIndex}/${resolvedDirs.length - 1}: ${prefix} → ${targetDir}`));
-      log.blank();
-    }
+      if (resolvedDirs.length > 2) {
+        const prefix = resolvedDirs.slice(0, targetIndex).join(', ');
+        log.step(fmt`Step ${targetIndex}/${resolvedDirs.length - 1}: ${prefix} → ${targetDir}`);
+      }
 
-    // Build the immediate source.
-    await runCommand('pnpm generate', {
-      cwd: sourcePath,
-      description: `Building ${sourceDir}`,
-    });
+      // Build the immediate source.
+      await runCommand('pnpm generate', {
+        cwd: sourcePath,
+        description: fmt`Building ${sourceDir}`,
+        doneDescription: fmt`Built ${sourceDir}`,
+      });
 
-    // Read freshly built package name from dist/package.json.
-    const sourceDistPkgPath = path.join(sourcePath, 'dist', 'package.json');
-    if (!pathExists(sourceDistPkgPath)) {
-      throw new Error(`Source dist/package.json not found at ${sourceDistPkgPath}. Did the build succeed?`);
-    }
+      // Read freshly built package name from dist/package.json.
+      const sourceDistPkgPath = path.join(sourcePath, 'dist', 'package.json');
+      if (!pathExists(sourceDistPkgPath)) {
+        throw new Error(`Source dist/package.json not found at ${sourceDistPkgPath}. Did the build succeed?`);
+      }
 
-    const sourceDistPkg = readJson<PackageJson>(sourceDistPkgPath);
-    const builtPackageName = sourceDistPkg.name;
-    if (!builtPackageName) {
-      throw new Error('Could not determine package name from source dist/package.json');
-    }
+      const sourceDistPkg = readJson<PackageJson>(sourceDistPkgPath);
+      const builtPackageName = sourceDistPkg.name;
+      if (!builtPackageName) {
+        throw new Error('Could not determine package name from source dist/package.json');
+      }
 
-    builtPackages.push({ sourceDir, packageName: builtPackageName });
+      builtPackages.push({ sourceDir, packageName: builtPackageName });
 
-    // Rewire the target's package.json to point at every built source.
-    const targetPkgPath = path.join(targetPath, 'package.json');
-    const targetPkg = readJson<PackageJson>(targetPkgPath);
-    const { needsUpdate, cachesToClear } = rewireTargetPkg(targetPkg, builtPackages);
+      // Rewire the target's package.json to point at every built source.
+      const targetPkgPath = path.join(targetPath, 'package.json');
+      const targetPkg = readJson<PackageJson>(targetPkgPath);
+      const { needsUpdate, cachesToClear } = rewireTargetPkg(targetPkg, builtPackages);
 
-    if (needsUpdate) {
-      writeJson(targetPkgPath, targetPkg);
-      log.success(`Updated file links in ${targetDir}/package.json`);
-    } else {
-      log.success(`All links already correct in ${targetDir}/package.json`);
-    }
+      if (needsUpdate) {
+        writeJson(targetPkgPath, targetPkg);
+        log.success(fmt`Updated file links in ${targetDir}/package.json`);
+      } else {
+        log.success(fmt`All links already correct in ${targetDir}/package.json`);
+      }
 
-    // Also rewire `pnpm-workspace.yaml` overrides, since pnpm 10+ resolves
-    // through workspace overrides before reading `dependencies`.
-    const workspaceOverridesChanged = rewireWorkspaceOverrides(targetPath, builtPackages);
-    if (workspaceOverridesChanged) {
-      log.success(`Updated overrides in ${targetDir}/pnpm-workspace.yaml`);
-    }
+      // Also rewire `pnpm-workspace.yaml` overrides, since pnpm 10+ resolves
+      // through workspace overrides before reading `dependencies`.
+      const workspaceOverridesChanged = rewireWorkspaceOverrides(targetPath, builtPackages);
+      if (workspaceOverridesChanged) {
+        log.success(fmt`Updated overrides in ${targetDir}/pnpm-workspace.yaml`);
+      }
 
-    // Refresh injected packages directly in the target's virtual store
-    // instead of running `pnpm i`: pnpm 11 short-circuits installs for
-    // `type: directory` `file:` resolutions because the lockfile has no
-    // integrity hash to compare against. Falls back to `pnpm i` when
-    // `package.json` actually changed, the package isn't in the store
-    // yet (first-time link), or the source's dep set drifted.
-    let installNeeded = needsUpdate || workspaceOverridesChanged;
-    const refreshSummary: string[] = [];
+      // Refresh injected packages directly in the target's virtual store
+      // instead of running `pnpm i`: pnpm 11 short-circuits installs for
+      // `type: directory` `file:` resolutions because the lockfile has no
+      // integrity hash to compare against. Falls back to `pnpm i` when
+      // `package.json` actually changed, the package isn't in the store
+      // yet (first-time link), or the source's dep set drifted.
+      let installNeeded = needsUpdate || workspaceOverridesChanged;
+      const refreshSummary: string[] = [];
 
-    if (!installNeeded) {
-      for (const built of builtPackages) {
-        const sourceDistPath = path.join(PROJECTS_DIR, built.sourceDir, 'dist');
-        const { refreshed, depsChanged } = refreshInjectedPackage(
-          targetPath,
-          built.packageName,
-          sourceDistPath,
-        );
+      if (!installNeeded) {
+        for (const built of builtPackages) {
+          const sourceDistPath = path.join(PROJECTS_DIR, built.sourceDir, 'dist');
+          const { refreshed, depsChanged } = refreshInjectedPackage(
+            targetPath,
+            built.packageName,
+            sourceDistPath,
+          );
 
-        if (depsChanged) {
-          log.warning(`${built.packageName}: source dependencies changed — running pnpm install`);
-          installNeeded = true;
-          break;
+          if (depsChanged) {
+            log.warning(`${built.packageName}: source dependencies changed — running pnpm install`);
+            installNeeded = true;
+            break;
+          }
+
+          if (refreshed.length === 0 && cachesToClear.includes(built.sourceDir)) {
+            log.warning(`${built.packageName}: not yet in virtual store — running pnpm install`);
+            installNeeded = true;
+            break;
+          }
+
+          if (refreshed.length > 0) {
+            const suffix = refreshed.length > 1 ? ` (×${refreshed.length})` : '';
+            refreshSummary.push(`${built.packageName}${suffix}`);
+          }
         }
+      }
 
-        if (refreshed.length === 0 && cachesToClear.includes(built.sourceDir)) {
-          log.warning(`${built.packageName}: not yet in virtual store — running pnpm install`);
-          installNeeded = true;
-          break;
-        }
+      if (installNeeded) {
+        await runCommand('pnpm i', {
+          cwd: targetPath,
+          description: fmt`Installing dependencies in ${targetDir}`,
+          doneDescription: fmt`Installed dependencies in ${targetDir}`,
+        });
+      } else if (refreshSummary.length > 0) {
+        log.success(fmt`Refreshed in ${targetDir}: ${refreshSummary.join(', ')}`);
+      }
 
-        if (refreshed.length > 0) {
-          const suffix = refreshed.length > 1 ? ` (×${refreshed.length})` : '';
-          refreshSummary.push(`${built.packageName}${suffix}`);
-        }
+      if (resolvedDirs.length > 2) {
+        log.success(fmt`Completed: ${cachesToClear.join(', ')} → ${targetDir}`);
       }
     }
 
-    if (installNeeded) {
-      await runCommand('pnpm i', {
-        cwd: targetPath,
-        description: `Installing dependencies in ${targetDir}`,
-      });
-    } else if (refreshSummary.length > 0) {
-      log.success(`Refreshed in ${targetDir}: ${refreshSummary.join(', ')}`);
+    if (chain.length === 1) {
+      log.success(fmt`Updated ${chain[0].sourceDir} → ${chain[0].targetDir}`);
+    } else {
+      log.success(fmt`Chain complete: ${resolvedDirs.join(' → ')}`);
     }
-
-    if (resolvedDirs.length > 2) {
-      log.blank();
-      log.success(`Completed: ${cachesToClear.join(', ')} → ${targetDir}`);
-      log.blank();
-    }
-  }
-
-  log.blank();
-  if (chain.length === 1) {
-    log.success(`Updated ${chain[0].sourceDir} → ${chain[0].targetDir}`);
-  } else {
-    log.success(`Chain complete: ${resolvedDirs.join(' → ')}`);
-  }
-  log.blank();
+  });
 };
 
 // ─────────────────────────────────────────────────────────────
-// Error reporter
+// Error reporter (pre-flight only; in-run failures are reported by runScript)
 // ─────────────────────────────────────────────────────────────
-main().catch((err: unknown) => {
-  log.blank();
-  const message = err instanceof Error ? err.message : String(err);
-  log.error(message);
-
-  if (SuggestionError.is(err)) {
-    log.blank();
-    console.log(theme.dim(`  ${err.suggestionLabel}`));
-    for (const suggestion of err.suggestions) {
-      console.log(`    ${theme.dim('•')} ${suggestion}`);
-    }
-  } else if (err instanceof Error && 'stderr' in err && typeof (err as { stderr?: unknown }).stderr === 'string') {
-    const stderr = (err as { stderr: string }).stderr;
-    if (stderr.trim().length > 0) {
-      console.log();
-      console.log(theme.dim('  Error details:'));
-      stderr
-        .split('\n')
-        .slice(0, 5)
-        .forEach((line) => {
-          if (line.trim()) console.log(`    ${theme.dim(line)}`);
-        });
-    }
-  }
-
-  log.blank();
-  process.exit(1);
-});
+main().catch(reportError);
